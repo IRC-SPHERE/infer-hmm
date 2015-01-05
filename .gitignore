@@ -1,2 +1,4 @@
 /HiddenMarkovModel/bin
 /HiddenMarkovModel/obj
+*.nupkg
+packages
