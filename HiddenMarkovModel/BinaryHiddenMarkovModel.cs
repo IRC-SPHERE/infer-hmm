@@ -14,10 +14,10 @@ namespace HiddenMarkovModel
     /// <summary>
     /// Hidden markov model.
     /// </summary>
-    class HiddenMarkovModel
+    class BinaryHiddenMarkovModel
     {
         // Set up emission data
-        private double[] EmitData;
+		private bool[] EmitData;
 
         // Set up the ranges
         private Range K;
@@ -26,20 +26,18 @@ namespace HiddenMarkovModel
         // Set up model variables
         private Variable<int> ZeroState;
         private VariableArray<int> States;
-        private readonly VariableArray<double> Emissions;
+		private VariableArray<bool> Emissions;
 
         // Set up model parameters
         private Variable<Vector> ProbInit;
         private VariableArray<Vector> CPTTrans;
-        private VariableArray<double> EmitMean;
-        private VariableArray<double> EmitPrec;
-
+		private VariableArray<double> Emit;
+        
         // Set up prior distributions
         private Variable<Dirichlet> ProbInitPrior;
         private VariableArray<Dirichlet> CPTTransPrior;
-        private VariableArray<Gaussian> EmitMeanPrior;
-        private VariableArray<Gamma> EmitPrecPrior;
-
+		private VariableArray<Beta> EmitPrior;
+        
         // Set up model evidence (likelihood of model given data)
         private Variable<bool> ModelEvidence;
 
@@ -49,8 +47,7 @@ namespace HiddenMarkovModel
         // Set up posteriors
         public Dirichlet ProbInitPosterior;
         public Dirichlet[] CPTTransPosterior;
-        public Gaussian[] EmitMeanPosterior;
-        public Gamma[] EmitPrecPosterior;
+		public Beta[] EmitPosterior;
         public Discrete[] StatesPosterior;
         public Bernoulli ModelEvidencePosterior;
 
@@ -59,7 +56,7 @@ namespace HiddenMarkovModel
         /// </summary>
         /// <param name="ChainLength">Chain length.</param>
         /// <param name="NumStates">Number states.</param>
-        public HiddenMarkovModel(int ChainLength, int NumStates)
+        public BinaryHiddenMarkovModel(int ChainLength, int NumStates)
         {
             ModelEvidence = Variable.Bernoulli(0.5).Named("evidence");
             using (Variable.If(ModelEvidence))
@@ -75,21 +72,16 @@ namespace HiddenMarkovModel
                 CPTTrans = Variable.Array<Vector>(K).Named("CPTTrans");
                 CPTTrans[K] = Variable<Vector>.Random(CPTTransPrior[K]);
                 CPTTrans.SetValueRange(K);
-                // Emit mean
-                EmitMeanPrior = Variable.Array<Gaussian>(K).Named("EmitMeanPrior");
-                EmitMean = Variable.Array<double>(K).Named("EmitMean");
-                EmitMean[K] = Variable<double>.Random(EmitMeanPrior[K]);
-                EmitMean.SetValueRange(K);
-                // Emit prec
-                EmitPrecPrior = Variable.Array<Gamma>(K).Named("EmitPrecPrior");
-                EmitPrec = Variable.Array<double>(K).Named("EmitPrec");
-                EmitPrec[K] = Variable<double>.Random(EmitPrecPrior[K]);
-                EmitPrec.SetValueRange(K);
-
+                // Emit prior
+				EmitPrior = Variable.Array<Beta>(K).Named("EmitPrior");
+				Emit = Variable.Array<double>(K).Named("Emit");
+				Emit[K] = Variable<double>.Random(EmitPrior[K]);
+				// Emit.SetValueRangeK);
+                
                 // Define the primary variables
                 ZeroState = Variable.Discrete(ProbInit).Named("z0"); // zero state does not have emission variable
                 States = Variable.Array<int>(T);
-                Emissions = Variable.Array<double>(T);
+                Emissions = Variable.Array<bool>(T);
 
                 // for block over length of chain
                 using (var block = Variable.ForEach(T))
@@ -118,7 +110,7 @@ namespace HiddenMarkovModel
                     // emission distribution
                     using (Variable.Switch(States[t]))
                     {
-                        Emissions[t] = Variable.GaussianFromMeanAndPrecision(EmitMean[States[t]], EmitPrec[States[t]]);
+						Emissions[t] = Variable.Bernoulli(Emit[States[t]]);
                     }   
                 }
             }
@@ -159,7 +151,7 @@ namespace HiddenMarkovModel
         /// Observes the data.
         /// </summary>
         /// <param name="emitData">Emit data.</param>
-        public void ObserveData(double[] emitData)
+		public void ObserveData(bool[] emitData)
         {
             // Save data as instance variable
             EmitData = emitData;
@@ -182,8 +174,7 @@ namespace HiddenMarkovModel
             //infer posteriors
             CPTTransPosterior = Engine.Infer<Dirichlet[]>(CPTTrans);
             ProbInitPosterior = Engine.Infer<Dirichlet>(ProbInit);
-            EmitMeanPosterior = Engine.Infer<Gaussian[]>(EmitMean);
-            EmitPrecPosterior = Engine.Infer<Gamma[]>(EmitPrec);
+			EmitPosterior = Engine.Infer<Beta[]>(Emit);
             StatesPosterior = Engine.Infer<Discrete[]>(States);
             ModelEvidencePosterior = Engine.Infer<Bernoulli>(ModelEvidence);
         }
@@ -196,7 +187,7 @@ namespace HiddenMarkovModel
             // reset observations
             for (int i = 0; i < T.SizeAsInt; i++)
             {
-                double emit = Emissions[i].ObservedValue;
+				bool emit = Emissions[i].ObservedValue;
                 Emissions[i].ClearObservedValue();
                 Emissions[i].ObservedValue = emit;
             }
@@ -209,8 +200,7 @@ namespace HiddenMarkovModel
         {
             ProbInitPrior.ObservedValue = Dirichlet.Uniform(K.SizeAsInt);
             CPTTransPrior.ObservedValue = Util.ArrayInit(K.SizeAsInt, k => Dirichlet.Uniform(K.SizeAsInt)).ToArray();
-            EmitMeanPrior.ObservedValue = Util.ArrayInit(K.SizeAsInt, k => Gaussian.FromMeanAndVariance(1000, 1000000000)).ToArray();
-            EmitPrecPrior.ObservedValue = Util.ArrayInit(K.SizeAsInt, k => Gamma.FromMeanAndVariance(0.1, 100)).ToArray();
+			EmitPrior.ObservedValue = Util.ArrayInit(K.SizeAsInt, k => new Beta(1, 1)).ToArray(); // Gaussian.FromMeanAndVariance(1000, 1000000000)).ToArray();
         }
 
         /// <summary>
@@ -218,14 +208,12 @@ namespace HiddenMarkovModel
         /// </summary>
         /// <param name="ProbInitPriorParamObs">Prob init prior parameter obs.</param>
         /// <param name="CPTTransPriorObs">CPT trans prior obs.</param>
-        /// <param name="EmitMeanPriorObs">Emit mean prior obs.</param>
-        /// <param name="EmitPrecPriorObs">Emit prec prior obs.</param>
-        public void SetPriors(Dirichlet ProbInitPriorParamObs, Dirichlet[] CPTTransPriorObs, Gaussian[] EmitMeanPriorObs, Gamma[] EmitPrecPriorObs)
+        /// <param name="EmitPriorObs">Emit prior obs.</param>
+		public void SetPriors(Dirichlet ProbInitPriorParamObs, Dirichlet[] CPTTransPriorObs, Beta[] EmitPriorObs)
         {
             ProbInitPrior.ObservedValue = ProbInitPriorParamObs;
             CPTTransPrior.ObservedValue = CPTTransPriorObs;
-            EmitMeanPrior.ObservedValue = EmitMeanPriorObs;
-            EmitPrecPrior.ObservedValue = EmitPrecPriorObs;
+            EmitPrior.ObservedValue = EmitPriorObs;
         }
 
         /// <summary>
@@ -233,20 +221,18 @@ namespace HiddenMarkovModel
         /// </summary>
         /// <param name="init">Init.</param>
         /// <param name="trans">Trans.</param>
-        /// <param name="emitMeans">Emit means.</param>
-        /// <param name="emitPrecs">Emit precs.</param>
-        public void SetParameters(double[] init, double[][] trans, double[] emitMeans, double[] emitPrecs)
+        /// <param name="emit">Emit.</param>
+		public void SetParameters(double[] init, double[][] trans, double[] emit)
         {
             // fix parameters
             ProbInit.ObservedValue = Vector.FromArray(init);
-            Vector[] v = new Vector[trans.Length];
+            var v = new Vector[trans.Length];
             for (int i = 0; i < trans.Length; i++)
             {
                 v[i] = Vector.FromArray(trans[i]);
             }
             CPTTrans.ObservedValue = v;
-            EmitMean.ObservedValue = emitMeans;
-            EmitPrec.ObservedValue = emitPrecs;
+			Emit.ObservedValue = emit;
         }
 
         /// <summary>
@@ -254,19 +240,16 @@ namespace HiddenMarkovModel
         /// </summary>
         public void SetParametersToMAPEstimates()
         {
-            Vector[] trans = new Vector[K.SizeAsInt];
-            double[] emitMean = new double[K.SizeAsInt];
-            double[] emitPrec = new double[K.SizeAsInt];
-            for (int i = 0; i < K.SizeAsInt; i++)
-            {
-                trans[i] = CPTTransPosterior[i].PseudoCount;
-                emitMean[i] = EmitMeanPosterior[i].GetMean();
-                emitPrec[i] = EmitPrecPosterior[i].GetMean();
-            }
+            var trans = new Vector[K.SizeAsInt];
+            var emit = new double[K.SizeAsInt];
+			for (int i = 0; i < K.SizeAsInt; i++)
+			{
+				trans[i] = CPTTransPosterior[i].PseudoCount;
+				emit[i] = EmitPosterior[i].GetMean();
+			}
             ProbInit.ObservedValue = ProbInitPosterior.PseudoCount;
             CPTTrans.ObservedValue = trans;
-            EmitMean.ObservedValue = emitMean;
-            EmitPrec.ObservedValue = emitPrec;
+            Emit.ObservedValue = emit;
         }
 
         /// <summary>
@@ -281,11 +264,7 @@ namespace HiddenMarkovModel
             }
             for (int i = 0; i < K.SizeAsInt; i++)
             {
-                Console.WriteLine("[" + i + "]" + EmitMeanPrior.ObservedValue[i]);
-            }
-            for (int i = 0; i < K.SizeAsInt; i++)
-            {
-                Console.WriteLine("[" + i + "]" + EmitPrecPrior.ObservedValue[i]);
+                Console.WriteLine("[" + i + "]" + EmitPrior.ObservedValue[i]);
             }
         }
 
@@ -301,11 +280,7 @@ namespace HiddenMarkovModel
             }
             for (int i = 0; i < K.SizeAsInt; i++)
             {
-                Console.WriteLine("[" + i + "]" + EmitMean.ObservedValue[i]);
-            }
-            for (int i = 0; i < K.SizeAsInt; i++)
-            {
-                Console.WriteLine("[" + i + "]" + EmitPrec.ObservedValue[i]);
+                Console.WriteLine("[" + i + "]" + Emit.ObservedValue[i]);
             }
         }
 
@@ -321,11 +296,7 @@ namespace HiddenMarkovModel
             }
             for (int i = 0; i < K.SizeAsInt; i++)
             {
-                Console.WriteLine("[" + i + "]" + EmitMeanPosterior[i]);
-            }
-            for (int i = 0; i < K.SizeAsInt; i++)
-            {
-                Console.WriteLine("[" + i + "]" + EmitPrecPosterior[i]);
+                Console.WriteLine("[" + i + "]" + EmitPosterior[i]);
             }
         }
 
@@ -344,31 +315,19 @@ namespace HiddenMarkovModel
             {
                 returnString += CPTTransPrior.ObservedValue[i].PseudoCount + "\n";
             }
-            // emit mean mean
+            // emit mean
             for (int i = 0; i < K.SizeAsInt; i++)
             {
-                returnString += EmitMeanPrior.ObservedValue[i].GetMean() + " ";
+                returnString += EmitPrior.ObservedValue[i].GetMean() + " ";
             }
             returnString += "\n";
-            // emit mean var
+            // emit var
             for (int i = 0; i < K.SizeAsInt; i++)
             {
-                returnString += EmitMeanPrior.ObservedValue[i].GetVariance() + " ";
+                returnString += EmitPrior.ObservedValue[i].GetVariance() + " ";
             }
             returnString += "\n";
-            // emit prec shape
-            for (int i = 0; i < K.SizeAsInt; i++)
-            {
-                returnString += EmitPrecPrior.ObservedValue[i].Shape + " ";
-            }
-            returnString += "\n";
-            // emit prec shape
-            for (int i = 0; i < K.SizeAsInt; i++)
-            {
-                returnString += EmitPrecPrior.ObservedValue[i].GetScale() + " ";
-            }
-            returnString += "\n";
-
+            
             return returnString;
         }
 
@@ -399,10 +358,10 @@ namespace HiddenMarkovModel
         public override string ToString()
         {
             string output = "";
-            Boolean PrintInit = true;
-            Boolean PrintTrans = true;
-            Boolean PrintEmit = true;
-            Boolean PrintStates = true;
+			const bool PrintInit = true;
+            const bool PrintTrans = true;
+            const bool PrintEmit = true;
+			const bool PrintStates = true;
 
             // output init
             if (PrintInit)
@@ -424,8 +383,7 @@ namespace HiddenMarkovModel
             {
                 for (int i = 0; i < K.SizeAsInt; i++)
                 {
-                    output += "Emit Mean Posterior[" + i + "] " + EmitMeanPosterior[i] + "\n";
-                    output += "Emit Prec Posterior[" + i + "] " + EmitPrecPosterior[i] + "\n";
+                    output += "Emit Posterior[" + i + "] " + EmitPosterior[i] + "\n";
                 }
             }
 

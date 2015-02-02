@@ -20,6 +20,7 @@ namespace HiddenMarkovModel
         static void Main(string[] args)
         {
             TestHiddenMarkovModel();
+			TestBinaryHiddenMarkovModel();
         }
 
         /// <summary>
@@ -99,14 +100,14 @@ namespace HiddenMarkovModel
             Console.WriteLine();
 
             // infer model parameters, states and model evidence given priors and emission data
-            HiddenMarkovModel model = new HiddenMarkovModel(T, K);
+			var model = new HiddenMarkovModel(T, K);
             model.SetPriors(ProbInitPriorObs, CPTTransPriorObs, EmitMeanPriorObs, EmitPrecPriorObs);
             model.ObserveData(emissions);
             model.InitialiseStatesRandomly();
             model.InferPosteriors();
             Console.WriteLine("model likelihood: " + model.ModelEvidencePosterior);
-            Discrete[] mapStatesDistr = model.StatesPosterior;
-            int[] mapStates = mapStatesDistr.Select(s => s.GetMode()).ToArray();
+			var mapStatesDistr = model.StatesPosterior;
+			var mapStates = mapStatesDistr.Select(s => s.GetMode()).ToArray();
             Console.WriteLine();
 
             // print maximum a priori states
@@ -140,12 +141,125 @@ namespace HiddenMarkovModel
             Console.WriteLine("------------------\n");
         }
 
+		/// <summary>
+		/// Tests the binary hidden markov model.
+		/// </summary>
+		static void TestBinaryHiddenMarkovModel()
+		{
+			// fix random seed
+			Rand.Restart(12347);
+
+			// model size
+			int T = 100;
+			int K = 2;
+
+			// set hyperparameters
+			var ProbInitPriorObs = Dirichlet.Uniform(K);
+			var CPTTransPriorObs = Enumerable.Repeat(Dirichlet.Uniform(K), K).ToArray();
+			var EmitPriorObs = Enumerable.Repeat(new Beta(1, 1), K).ToArray();
+
+			// sample model parameters
+			var init = ProbInitPriorObs.Sample().ToArray();
+			var trans = new double[K][];
+			for (int i = 0; i < K; i++)
+			{
+				trans[i] = CPTTransPriorObs[i].Sample().ToArray();
+			}
+			var emit = new double[K];
+			for (int i = 0; i < K; i++)
+			{
+				emit[i] = EmitPriorObs[i].Sample();
+			}
+
+			// print parameters
+			var modelForPrinting = new BinaryHiddenMarkovModel(T, K);
+			modelForPrinting.SetParameters(init, trans, emit);
+			Console.WriteLine("parameters:");
+			modelForPrinting.PrintParameters();
+			Console.WriteLine();
+
+			// create distributions for sampling
+			var initDist = new Discrete(init);
+			var transDist = new Discrete[K];
+			for (int i = 0; i < K; i++)
+			{
+				transDist[i] = new Discrete(trans[i]);
+			}
+			var emitDist = new Bernoulli[K];
+			for (int i = 0; i < K; i++)
+			{
+				emitDist[i] = new Bernoulli(emit[i]);
+			}
+
+			// calculate order of actual states
+			int[] actualStateOrder = argSort(emitDist);
+			Console.WriteLine("actualStateOrder");
+			Console.WriteLine(string.Join(",", actualStateOrder));
+			Console.WriteLine();
+
+			// sample state and emission data
+			var actualStates = new int[T];
+			var emissions = new bool[T];
+			actualStates[0] = initDist.Sample();
+			emissions[0] = emitDist[actualStates[0]].Sample();
+			for (int i = 1; i < T; i++)
+			{
+				actualStates[i] = transDist[actualStates[i-1]].Sample();
+				emissions[i] = emitDist[actualStates[i]].Sample();
+			}
+			Console.WriteLine("sample data:");
+			Console.WriteLine(string.Join(",", actualStates));
+			Console.WriteLine();
+
+			// infer model parameters, states and model evidence given priors and emission data
+			var model = new BinaryHiddenMarkovModel(T, K);
+			model.SetPriors(ProbInitPriorObs, CPTTransPriorObs, EmitPriorObs);
+			model.ObserveData(emissions);
+			model.InitialiseStatesRandomly();
+			model.InferPosteriors();
+			Console.WriteLine("model likelihood: " + model.ModelEvidencePosterior);
+			Discrete[] mapStatesDistr = model.StatesPosterior;
+			int[] mapStates = mapStatesDistr.Select(s => s.GetMode()).ToArray();
+			Console.WriteLine();
+
+			// print maximum a priori states
+			Console.WriteLine("statesMAP");
+			Console.WriteLine(string.Join(",", mapStates));
+			Console.WriteLine();
+
+			// print posterior distributions
+			Console.WriteLine("posteriors");
+			model.PrintPosteriors();
+			Console.WriteLine();
+
+			// calculate order of MAP states
+			int[] mapStateOrder = argSort(model.EmitPosterior);
+			Console.WriteLine("mapStateOrder");
+			Console.WriteLine(string.Join(",", mapStateOrder));
+			Console.WriteLine();
+
+			// accuracy of MAP estimates
+			int correctStates = 0;
+			for (int i = 0; i < actualStates.Length; i++)
+			{
+				if (actualStateOrder[actualStates[i]] == mapStateOrder[mapStates[i]])
+				{
+					correctStates++;
+				}
+			}
+			Console.WriteLine("correctStates: " + correctStates + " / " + actualStates.Length);
+			Console.WriteLine();
+
+			Console.WriteLine("------------------\n");
+		}
+
         /// <summary>
         /// Returns the indices of sorting.
         /// </summary>
         /// <returns>The indices.</returns>
         /// <param name="EmitMeanPosterior">Emit mean posterior.</param>
-        public static int[] argSort(Gaussian[] EmitMeanPosterior)
+		public static int[] argSort<TDistribution>(TDistribution[] EmitMeanPosterior)
+			where TDistribution : CanGetMean<double>
         {
             int[] order = new int[EmitMeanPosterior.Length];
             for (int i = 0; i < EmitMeanPosterior.Length; i++)
