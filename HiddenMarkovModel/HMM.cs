@@ -1,5 +1,5 @@
 ﻿//
-// TemporalSegmentations.cs
+// HMM.cs
 //
 // Author:
 //       Tom Diethe <tom.diethe@bristol.ac.uk>
@@ -27,7 +27,6 @@
 namespace HiddenMarkovModel
 {
     using System;
-    using System.Linq;
 
     using MicrosoftResearch.Infer;
     using MicrosoftResearch.Infer.Distributions;
@@ -38,70 +37,93 @@ namespace HiddenMarkovModel
     /// <summary>
     /// Hidden markov model.
     /// </summary>
-    public class BinaryHiddenMarkovModel
+	public abstract class HMM<TEmit, TEmitMeanDist, TEmitMean, TEmitPrecDist, TEmitPrec> 
+		where TEmitMeanDist : IDistribution<TEmitMean>, CanGetMean<TEmitMean>
+		where TEmitPrecDist : IDistribution<TEmitPrec> , CanGetMean<TEmitPrec>
     {
         /// <summary>
-        /// The emission data
+        /// The emit data.
         /// </summary>
-        private bool[] emitData;
+		private TEmit[] emitData;
 
         /// <summary>
-        /// The k.
+        /// The hidden states.
         /// </summary>
-        private readonly Range k;
+        private Range k;
 
         /// <summary>
-        /// The t.
+        /// The chain length.
         /// </summary>
-        private readonly Range T;
+		private Range chain;
+
+		/// <summary>
+		/// The emission.
+		/// </summary>
+		private Range emission;
 
         /// <summary>
         /// The states.
         /// </summary>
-        private readonly VariableArray<int> states;
+        private VariableArray<int> states;
 
         /// <summary>
         /// The emissions.
         /// </summary>
-        private readonly VariableArray<bool> emissions;
+		private VariableArray<TEmit> emissions;
 
         /// <summary>
         /// The prob init.
         /// </summary>
-        private readonly Variable<Vector> probInit;
+        private Variable<Vector> probInit;
 
         /// <summary>
         /// The cpt trans.
         /// </summary>
-        private readonly VariableArray<Vector> cptTrans;
+        private VariableArray<Vector> cptTrans;
 
         /// <summary>
-        /// The emit.
+        /// The emit mean.
         /// </summary>
-        private readonly VariableArray<double> emit;
+		private VariableArray<TEmitMean> emitMean;
+
+        /// <summary>
+        /// The emit prec.
+        /// </summary>
+		private VariableArray<TEmitPrec> emitPrec;
 
         /// <summary>
         /// The prob init prior.
         /// </summary>
-        private readonly Variable<Dirichlet> probInitPrior;
+        private Variable<Dirichlet> probInitPrior;
 
         /// <summary>
         /// The cpt trans prior.
         /// </summary>
-        private readonly VariableArray<Dirichlet> cptTransPrior;
+        private VariableArray<Dirichlet> cptTransPrior;
 
         /// <summary>
-        /// The emit prior.
+        /// The emit mean prior.
         /// </summary>
-        private readonly VariableArray<Beta> emitPrior;
-        
-        // Set up model evidence (likelihood of model given data)
-        private readonly Variable<bool> modelEvidence;
+		private VariableArray<TEmitMeanDist> emitMeanPrior;
 
-        // Inference engine
+        /// <summary>
+        /// The emit prec prior.
+        /// </summary>
+		private VariableArray<TEmitPrecDist> emitPrecPrior;
+
+        /// <summary>
+        /// The model evidence.
+        /// </summary>
+        private Variable<bool> modelEvidence;
+
+        /// <summary>
+        /// The engine.
+        /// </summary>
         private InferenceEngine engine;
 
-        // Set up posteriors
+        /// <summary>
+        /// The prob init posterior.
+        /// </summary>
         private Dirichlet probInitPosterior;
 
         /// <summary>
@@ -110,32 +132,43 @@ namespace HiddenMarkovModel
         private Dirichlet[] cptTransPosterior;
 
         /// <summary>
-        /// The emit posterior.
+        /// The emit mean posterior.
         /// </summary>
-        internal Beta[] emitPosterior;
+		internal TEmitMeanDist[] emitMeanPosterior;
+
+        /// <summary>
+        /// The emit prec posterior.
+        /// </summary>
+		private TEmitPrecDist[] emitPrecPosterior;
 
         /// <summary>
         /// The states posterior.
         /// </summary>
         internal Discrete[] statesPosterior;
 
-        /// <summary>
-        /// The model evidence posterior.
-        /// </summary>
+		/// <summary>
+		/// The model evidence posterior.
+		/// </summary>
         internal Bernoulli modelEvidencePosterior;
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="BinaryHiddenMarkovModel" /> class.
+        /// Creates the model.
         /// </summary>
-        /// <param name="ChainLength">Chain length.</param>
-        /// <param name="NumStates">Number states.</param>
-        public BinaryHiddenMarkovModel(int ChainLength, int NumStates)
+        /// <param name="chainLength">Chain length.</param>
+        /// <param name="numStates">Number states.</param>
+        /// <param name="emissionDimension">Emission dimension.</param>
+        /// <param name="includePrecision">If set to <c>true</c> include precision.</param>
+		public virtual void CreateModel(int chainLength, int numStates, int emissionDimension = 1, bool includePrecision = true, bool showFactorGraph = true)
         {
             this.modelEvidence = Variable.Bernoulli(0.5).Named("evidence");
             using (Variable.If(this.modelEvidence))
             {
-                this.k = new Range(NumStates).Named("K");
-                T = new Range(ChainLength).Named("T");
+                this.k = new Range(numStates).Named("K");
+                this.chain = new Range(chainLength).Named("chain");
+				if (emissionDimension > 1)
+				{
+					this.emission = new Range(emissionDimension).Named("emission");
+				}
 
                 // Init
                 this.probInitPrior = Variable.New<Dirichlet>().Named("ProbInitPrior");
@@ -148,20 +181,28 @@ namespace HiddenMarkovModel
                 this.cptTrans[this.k] = Variable<Vector>.Random(this.cptTransPrior[this.k]);
                 this.cptTrans.SetValueRange(this.k);
                 
-                // Emit prior
-                this.emitPrior = Variable.Array<Beta>(this.k).Named("EmitPrior");
-                this.emit = Variable.Array<double>(this.k).Named("Emit");
-                this.emit[this.k] = Variable<double>.Random(this.emitPrior[this.k]);
+                // Emit mean
+                this.emitMeanPrior = Variable.Array<TEmitMeanDist>(this.k).Named("EmitMeanPrior");
+				this.emitMean = Variable.Array<TEmitMean>(this.k).Named("EmitMean");
+				this.emitMean[this.k] = Variable<TEmitMean>.Random(this.emitMeanPrior[this.k]);
+				this.emitMean.SetValueRange(emissionDimension > 1 ? this.emission : this.k);
                 
-                // Emit.SetValueRangeK);
-                
+                // Emit prec
+				if (includePrecision)
+				{
+					this.emitPrecPrior = Variable.Array<TEmitPrecDist>(this.k).Named("EmitPrecPrior");
+					this.emitPrec = Variable.Array<TEmitPrec>(this.k).Named("EmitPrec");
+					this.emitPrec[this.k] = Variable<TEmitPrec>.Random(this.emitPrecPrior[this.k]);
+					this.emitPrec.SetValueRange(this.k);
+				}
+
                 // Define the primary variables
                 Variable<int> zeroState = Variable.Discrete(this.probInit).Named("z0");
-                this.states = Variable.Array<int>(T);
-                this.emissions = Variable.Array<bool>(T);
+                this.states = Variable.Array<int>(chain);
+                this.emissions = Variable.Array<TEmit>(chain);
 
                 // for block over length of chain
-                using (var block = Variable.ForEach(T))
+                using (var block = Variable.ForEach(chain))
                 {
                     var t = block.Index;
                     var previousState = this.states[t - 1];
@@ -171,7 +212,7 @@ namespace HiddenMarkovModel
                     {
                         using (Variable.Switch(zeroState))
                         {
-                            this.states[T] = Variable.Discrete(this.cptTrans[zeroState]);
+                            this.states[chain] = Variable.Discrete(this.cptTrans[zeroState]);
                         }
                     }
 
@@ -187,29 +228,39 @@ namespace HiddenMarkovModel
                     // emission distribution
                     using (Variable.Switch(this.states[t]))
                     {
-                        this.emissions[t] = Variable.Bernoulli(this.emit[this.states[t]]);
+						this.emissions[t] = this.EmissionFunction(this.emitMean, this.emitPrec, this.states[t]);
                     }   
                 }
             }
 
-            DefineInferenceEngine();
+            DefineInferenceEngine(showFactorGraph);
         }
+
+		/// <summary>
+		/// The Emission function.
+		/// </summary>
+		/// <returns>The function.</returns>
+		/// <param name="means">Means.</param>
+		/// <param name="precs">Precs.</param>
+		/// <param name="state">State.</param>
+		public abstract Variable<TEmit> EmissionFunction(VariableArray<TEmitMean> means, VariableArray<TEmitPrec> precs, Variable<int> state);
 
         /// <summary>
         /// Defines the inference engine.
         /// </summary>
-        public void DefineInferenceEngine()
+		public void DefineInferenceEngine(bool showFactorGraph)
         {
             // Set up inference engine
-            this.engine = new InferenceEngine(new ExpectationPropagation())
-                              {
-                                  ShowFactorGraph = true,
-                                  ShowWarnings = true,
-                                  ShowProgress = true,
-                                  NumberOfIterations = 15,
-                                  ShowTimings = true,
-                                  ShowSchedule = false
-                              };
+			this.engine = new InferenceEngine(new ExpectationPropagation())
+			{
+				ShowFactorGraph = showFactorGraph,
+				ShowWarnings = true,
+				ShowProgress = true,
+				NumberOfIterations = 15,
+				ShowTimings = true,
+				ShowSchedule = false
+			};
+            
             this.engine.Compiler.WriteSourceFiles = true;
         }
 
@@ -218,20 +269,20 @@ namespace HiddenMarkovModel
         /// </summary>
         public void InitialiseStatesRandomly()
         {
-            var zinit = Variable<Discrete>.Array(T);
-            zinit.ObservedValue = Util.ArrayInit(T.SizeAsInt, t => Discrete.PointMass(Rand.Int(this.k.SizeAsInt), this.k.SizeAsInt));
-            this.states[T].InitialiseTo(zinit[T]);
+            VariableArray<Discrete> zinit = Variable<Discrete>.Array(chain);
+            zinit.ObservedValue = Util.ArrayInit(chain.SizeAsInt, t => Discrete.PointMass(Rand.Int(this.k.SizeAsInt), this.k.SizeAsInt));
+            this.states[chain].InitialiseTo(zinit[chain]);
         }
 
         /// <summary>
         /// Observes the data.
         /// </summary>
         /// <param name="data">Emit data.</param>
-        public void ObserveData(bool[] data)
+		public void ObserveData(TEmit[] data)
         {
             // Save data as instance variable
             this.emitData = data;
-            
+
             // Observe it
             this.emissions.ObservedValue = data;
         }
@@ -241,17 +292,15 @@ namespace HiddenMarkovModel
         /// </summary>
         public void InferPosteriors()
         {
-            // for monitoring convergence
-            //for (int i = 1; i <= 35; i++ )
-            //{
-            //    Engine.NumberOfIterations = i;
-            //    Console.WriteLine(CPTTransPosterior[0]);
-            //}
-
-            //infer posteriors
+            // infer posteriors
             this.cptTransPosterior = this.engine.Infer<Dirichlet[]>(this.cptTrans);
             this.probInitPosterior = this.engine.Infer<Dirichlet>(this.probInit);
-            this.emitPosterior = this.engine.Infer<Beta[]>(this.emit);
+			this.emitMeanPosterior = this.engine.Infer<TEmitMeanDist[]>(this.emitMean);
+			if (!ReferenceEquals(this.emitPrecPrior, null))
+			{
+				this.emitPrecPosterior = this.engine.Infer<TEmitPrecDist[]>(this.emitPrec);
+			}
+
             this.statesPosterior = this.engine.Infer<Discrete[]>(this.states);
             this.modelEvidencePosterior = this.engine.Infer<Bernoulli>(this.modelEvidence);
         }
@@ -262,22 +311,12 @@ namespace HiddenMarkovModel
         public void ResetInference()
         {
             // reset observations
-            for (int i = 0; i < T.SizeAsInt; i++)
+            for (int i = 0; i < chain.SizeAsInt; i++)
             {
-                bool emit = this.emissions[i].ObservedValue;
+				var emit = this.emissions[i].ObservedValue;
                 this.emissions[i].ClearObservedValue();
                 this.emissions[i].ObservedValue = emit;
             }
-        }
-
-        /// <summary>
-        /// Sets the uninformed priors.
-        /// </summary>
-        public void SetUninformedPriors()
-        {
-            this.probInitPrior.ObservedValue = Dirichlet.Uniform(this.k.SizeAsInt);
-            this.cptTransPrior.ObservedValue = Util.ArrayInit(this.k.SizeAsInt, k => Dirichlet.Uniform(this.k.SizeAsInt)).ToArray();
-            this.emitPrior.ObservedValue = Util.ArrayInit(this.k.SizeAsInt, k => new Beta(1, 1)).ToArray(); // Gaussian.FromMeanAndVariance(1000, 1000000000)).ToArray();
         }
 
         /// <summary>
@@ -285,12 +324,17 @@ namespace HiddenMarkovModel
         /// </summary>
         /// <param name="ProbInitPriorParamObs">Prob init prior parameter obs.</param>
         /// <param name="CPTTransPriorObs">CPT trans prior obs.</param>
-        /// <param name="EmitPriorObs">Emit prior obs.</param>
-        public void SetPriors(Dirichlet ProbInitPriorParamObs, Dirichlet[] CPTTransPriorObs, Beta[] EmitPriorObs)
+        /// <param name="EmitMeanPriorObs">Emit mean prior obs.</param>
+        /// <param name="EmitPrecPriorObs">Emit prec prior obs.</param>
+		public void SetPriors(Dirichlet ProbInitPriorParamObs, Dirichlet[] CPTTransPriorObs, TEmitMeanDist[] EmitMeanPriorObs, TEmitPrecDist[] EmitPrecPriorObs)
         {
             this.probInitPrior.ObservedValue = ProbInitPriorParamObs;
             this.cptTransPrior.ObservedValue = CPTTransPriorObs;
-            this.emitPrior.ObservedValue = EmitPriorObs;
+            this.emitMeanPrior.ObservedValue = EmitMeanPriorObs;
+			if (!ReferenceEquals(this.emitPrecPrior, null))
+			{
+				this.emitPrecPrior.ObservedValue = EmitPrecPriorObs;
+			}
         }
 
         /// <summary>
@@ -298,8 +342,9 @@ namespace HiddenMarkovModel
         /// </summary>
         /// <param name="init">Init.</param>
         /// <param name="trans">Trans.</param>
-        /// <param name="emit">Emit.</param>
-        public void SetParameters(double[] init, double[][] trans, double[] emit)
+        /// <param name="emitMeans">Emit means.</param>
+        /// <param name="emitPrecs">Emit precs.</param>
+		public void SetParameters(double[] init, double[][] trans, TEmitMean[] emitMeans, TEmitPrec[] emitPrecs)
         {
             // fix parameters
             this.probInit.ObservedValue = Vector.FromArray(init);
@@ -308,25 +353,37 @@ namespace HiddenMarkovModel
             {
                 v[i] = Vector.FromArray(trans[i]);
             }
+
             this.cptTrans.ObservedValue = v;
-            this.emit.ObservedValue = emit;
+            this.emitMean.ObservedValue = emitMeans;
+			if (!ReferenceEquals(this.emitPrecPrior, null))
+			{
+				this.emitPrec.ObservedValue = emitPrecs;
+			}
         }
 
         /// <summary>
         /// Sets the parameters to MAP estimates.
         /// </summary>
-        public void SetParametersToMAPEstimates()
+        public void SetParametersToMapEstimates()
         {
             var trans = new Vector[this.k.SizeAsInt];
-            var emit = new double[this.k.SizeAsInt];
+			var mean = new TEmitMean[this.k.SizeAsInt];
+			var prec = new TEmitPrec[this.k.SizeAsInt];
             for (int i = 0; i < this.k.SizeAsInt; i++)
             {
                 trans[i] = this.cptTransPosterior[i].PseudoCount;
-                emit[i] = this.emitPosterior[i].GetMean();
+                mean[i] = this.emitMeanPosterior[i].GetMean();
+                prec[i] = this.emitPrecPosterior[i].GetMean();
             }
+
             this.probInit.ObservedValue = this.probInitPosterior.PseudoCount;
             this.cptTrans.ObservedValue = trans;
-            this.emit.ObservedValue = emit;
+            this.emitMean.ObservedValue = mean;
+			if (!ReferenceEquals(this.emitPrecPrior, null))
+			{
+				this.emitPrec.ObservedValue = prec;
+			}
         }
 
         /// <summary>
@@ -339,9 +396,20 @@ namespace HiddenMarkovModel
             {
                 Console.WriteLine("[" + i + "]" + this.cptTransPrior.ObservedValue[i]);
             }
+
             for (int i = 0; i < this.k.SizeAsInt; i++)
             {
-                Console.WriteLine("[" + i + "]" + this.emitPrior.ObservedValue[i]);
+                Console.WriteLine("[" + i + "]" + this.emitMeanPrior.ObservedValue[i]);
+            }
+
+			if (ReferenceEquals(this.emitPrecPrior, null))
+			{
+				return;
+			}
+
+            for (int i = 0; i < this.k.SizeAsInt; i++)
+            {
+                Console.WriteLine("[" + i + "]" + this.emitPrecPrior.ObservedValue[i]);
             }
         }
 
@@ -355,9 +423,20 @@ namespace HiddenMarkovModel
             {
                 Console.WriteLine("[" + i + "]" + this.cptTrans.ObservedValue[i]);
             }
+
             for (int i = 0; i < this.k.SizeAsInt; i++)
             {
-                Console.WriteLine("[" + i + "]" + this.emit.ObservedValue[i]);
+                Console.WriteLine("[" + i + "]" + this.emitMean.ObservedValue[i]);
+            }
+            
+			if (ReferenceEquals(this.emitPrec, null))
+			{
+				return;
+			}
+
+            for (int i = 0; i < this.k.SizeAsInt; i++)
+            {
+                Console.WriteLine("[" + i + "]" + this.emitPrec.ObservedValue[i]);
             }
         }
 
@@ -371,41 +450,21 @@ namespace HiddenMarkovModel
             {
                 Console.WriteLine("[" + i + "]" + this.cptTransPosterior[i]);
             }
-            for (int i = 0; i < this.k.SizeAsInt; i++)
-            {
-                Console.WriteLine("[" + i + "]" + this.emitPosterior[i]);
-            }
-        }
-
-        /// <summary>
-        /// Hyperparameterses to string.
-        /// </summary>
-        /// <returns>The to string.</returns>
-        public string HyperparametersToString()
-        {
-            string returnString = string.Empty;
-
-            // init
-            returnString += this.probInitPrior.ObservedValue.PseudoCount + "\n";
-            // trans
-            for (int i = 0; i < this.k.SizeAsInt; i++)
-            {
-                returnString += this.cptTransPrior.ObservedValue[i].PseudoCount + "\n";
-            }
-            // emit mean
-            for (int i = 0; i < this.k.SizeAsInt; i++)
-            {
-                returnString += this.emitPrior.ObservedValue[i].GetMean() + " ";
-            }
-            returnString += "\n";
-            // emit var
-            for (int i = 0; i < this.k.SizeAsInt; i++)
-            {
-                returnString += this.emitPrior.ObservedValue[i].GetVariance() + " ";
-            }
-            returnString += "\n";
             
-            return returnString;
+            for (int i = 0; i < this.k.SizeAsInt; i++)
+            {
+                Console.WriteLine("[" + i + "]" + this.emitMeanPosterior[i]);
+            }
+
+			if (ReferenceEquals(this.emitPrecPrior, null))
+			{
+				return;
+			}
+            
+            for (int i = 0; i < this.k.SizeAsInt; i++)
+            {
+                Console.WriteLine("[" + i + "]" + this.emitPrecPosterior[i]);
+            }
         }
 
         /// <summary>
@@ -414,26 +473,26 @@ namespace HiddenMarkovModel
         public void PrintStates()
         {
             string output = "state, power" + "\n";
-            for (int i = 0; i < T.SizeAsInt; i++)
+            for (int i = 0; i < this.chain.SizeAsInt; i++)
             {
                 output += this.engine.Infer<Discrete>(this.states[i]).GetMode() + ", " + this.emitData[i] + "\n";
             }
-
+            
             Console.WriteLine(output);
 
             output = "state, power" + "\n";
-            for (int i = 0; i < T.SizeAsInt; i++)
+            for (int i = 0; i < this.chain.SizeAsInt; i++)
             {
                 output += this.engine.Infer<Discrete>(this.states[i]) + ", " + this.emitData[i] + "\n";
             }
-
+            
             Console.WriteLine(output);
         }
 
         /// <summary>
-        /// Returns a <see cref="System.String"/> that represents the current <see cref="BinaryHiddenMarkovModel"/>.
+        /// Returns a <see cref="System.String"/> that represents the current <see cref="HiddenMarkovModel"/>.
         /// </summary>
-        /// <returns>A <see cref="System.String"/> that represents the current <see cref="BinaryHiddenMarkovModel"/>.</returns>
+        /// <returns>A <see cref="System.String"/> that represents the current <see cref="HiddenMarkovModel"/>.</returns>
         public override string ToString()
         {
             string output = string.Empty;
@@ -462,7 +521,8 @@ namespace HiddenMarkovModel
             {
                 for (int i = 0; i < this.k.SizeAsInt; i++)
                 {
-                    output += "Emit Posterior[" + i + "] " + this.emitPosterior[i] + "\n";
+                    output += "Emit Mean Posterior[" + i + "] " + this.emitMeanPosterior[i] + "\n";
+                    output += "Emit Prec Posterior[" + i + "] " + this.emitPrecPosterior[i] + "\n";
                 }
             }
 
@@ -470,7 +530,7 @@ namespace HiddenMarkovModel
             if (PrintStates)
             {
                 output += "state, power" + "\n";
-                for (int i = 0; i < T.SizeAsInt; i++)
+                for (int i = 0; i < chain.SizeAsInt; i++)
                 {
                     Console.WriteLine(this.statesPosterior[i]);
                     output += this.statesPosterior[i].GetMode() + ", " + this.emissions[i].ObservedValue + "\n";
